@@ -1,10 +1,19 @@
 # SPARTH
 ## Product Requirements Document (PRD)
-**Version:** 1.0  
+**Version:** 1.1  
 **Date:** May 2026  
 **Prepared for:** myofficespace  
 **Founders:** Manjunath & Sharath  
-**Status:** Draft — Awaiting Review
+**Status:** Draft — In Progress
+
+**Changelog v1.1:**
+- Section 13 fully replaced with two-level taxonomy sourced from Myofficespace Clockify Tags Master
+- Billing & Commercial confirmed: handled inside SPARTH (OQ-02 resolved)
+- Preventive Maintenance confirmed: Phase 2 scope (OQ-02 resolved)
+- Fit-out & Customization confirmed: separate workflow and separate database table, not part of maintenance tickets (OQ-02 resolved)
+- Section 11.7 database schema updated with `fitout_requests` table
+- Design Decision DD-12 added for Fit-out separation
+- OQ-02 closed in Section 14
 
 ---
 
@@ -438,9 +447,15 @@ Every major decision made during the design of SPARTH is recorded here with the 
 
 **Reason:** PostgreSQL is the most widely used open-source relational database, with proven stability at scale, strong support for concurrent writes, and excellent tooling. It runs on any VPS at zero cost. Its data model (structured tables, relationships, indices) is a natural fit for ticket management. It also provides the foundation for Phase 2 analytics — any reporting or business intelligence tool can connect directly to PostgreSQL.
 
----
+### DD-12: Fit-out & Customization as a Separate Workflow and Table
 
-## 9. System Architecture — Production
+**Decision:** Fit-out and customisation requests (workstation setup, partition work, cabin modifications, seating expansion, branding) are handled through a completely separate workflow and stored in a dedicated `fitout_requests` table. They are not part of the maintenance ticket pipeline.
+
+**Reason:** Maintenance tickets have a simple lifecycle — reported, assigned, resolved, closed, typically within hours. Fit-out requests are project-type work with a fundamentally different lifecycle — submitted, reviewed, approved, vendor sourced, executed over days or weeks, then completed. They involve cost estimation, vendor management, approval gates, and potentially multiple stakeholders. Mixing them into the tickets table would pollute reporting, break SLA logic, and create confusion in the NocoDB views. A separate table with a separate status vocabulary (Submitted / Under Review / Approved / In Progress / Completed / Rejected) correctly models this lifecycle.
+
+**Trade-off accepted:** Two workflows and two tables to maintain instead of one. This is worth the clarity it provides to both the operations team and the reporting layer.
+
+---
 
 ### 9.1 High-Level Flow
 
@@ -627,7 +642,30 @@ The following accounts and tools must be set up before build begins:
 
 **Step 1 — Database Setup (Supabase)**
 - Create a new Supabase project
-- Create the `tickets` table with the schema defined in Section 11.7
+- Create the three tables using the schema defined in Section 11.7
+- Seed the `hubs` table with the PoC hub:
+
+```sql
+INSERT INTO hubs (hub_code, hub_name, location, manager_phone, manager_name, active)
+VALUES ('ALP', 'Alpha', 'Test Location', '<test-manager-phone>', 'Test Manager', TRUE);
+```
+
+- Seed the `reporters` table with the three test phone numbers:
+
+```sql
+-- Phone 1: Tenant / Reporter
+INSERT INTO reporters (phone_number, name, hub_code)
+VALUES ('<test-tenant-phone>', 'Test Tenant', 'ALP');
+
+-- Phone 2: Hub Manager
+INSERT INTO reporters (phone_number, name, hub_code)
+VALUES ('<test-manager-phone>', 'Test Manager', 'ALP');
+
+-- Phone 3: Maintenance Staff
+INSERT INTO reporters (phone_number, name, hub_code)
+VALUES ('<test-staff-phone>', 'Test Staff', 'ALP');
+```
+
 - Copy the Supabase PostgreSQL connection string
 
 **Step 2 — NocoDB Setup**
@@ -668,50 +706,22 @@ The following accounts and tools must be set up before build begins:
 - Send resolution notifications to reporter and founders
 
 **Step 9 — PoC Demo Run**
-- With 3 test phones (tenant, hub manager, staff)
-- Tenant sends photo + voice note to Twilio sandbox WhatsApp number
-- Observe ticket appear in NocoDB within 3 minutes
-- Hub manager receives WhatsApp, replies ASSIGN
-- Staff receives WhatsApp, replies DONE with photo
-- Founders group receives resolution notification
-- Verify full ticket record in NocoDB
+- With 3 test phones: Phone 1 (tenant), Phone 2 (hub manager), Phone 3 (maintenance staff)
+- All three join the Twilio WhatsApp Sandbox by sending the join code to the Twilio sandbox number
+- Phone 1 (tenant) sends a photo + voice note to the sandbox number simulating the Alpha hub group
+- Observe ticket ALP-001 appear in NocoDB within 3 minutes
+- Phone 2 (hub manager) receives WhatsApp notification, replies: ASSIGN Test Staff
+- Phone 3 (staff) receives WhatsApp task assignment
+- Phone 3 replies: DONE ALP-001 + photo
+- Phone 1 (tenant) and Phone 2 (founders group simulation) receive resolution notification
+- Verify full ticket record in NocoDB: assigned_by, assigned_to, resolution_time_minutes all populated
 
 ### 11.7 Tickets Table Schema
 
 ```sql
-CREATE TABLE tickets (
-    id                  SERIAL PRIMARY KEY,
-    ticket_id           VARCHAR(20) UNIQUE NOT NULL,       -- e.g. KRM-042
-    hub_name            VARCHAR(100) NOT NULL,
-    hub_code            VARCHAR(10) NOT NULL,
-    category            VARCHAR(50) NOT NULL,
-    priority            VARCHAR(20) DEFAULT 'Normal',      -- Low / Normal / High / Critical
-    status              VARCHAR(20) DEFAULT 'Open',        -- Open / In Progress / Resolved
-    reporter_phone      VARCHAR(20) NOT NULL,
-    reporter_name       VARCHAR(100),
-    source_channel      VARCHAR(20) NOT NULL,              -- WhatsApp / Email / Phone / Walk-in
-    complaint_text      TEXT,
-    voice_transcription TEXT,
-    photo_urls          TEXT[],                            -- Array of photo file paths or URLs
-    resolution_photo_url VARCHAR(500),
-    assigned_by_manager VARCHAR(100),
-    assigned_to_staff   VARCHAR(100),
-    reporter_count      INTEGER DEFAULT 1,
-    escalation_flag     BOOLEAN DEFAULT FALSE,
-    created_at          TIMESTAMP DEFAULT NOW(),
-    assigned_at         TIMESTAMP,
-    resolved_at         TIMESTAMP,
-    resolution_time_minutes INTEGER,                       -- Calculated on close
-    notes               TEXT
-);
-
-CREATE TABLE reporters (
-    phone_number        VARCHAR(20) PRIMARY KEY,
-    name                VARCHAR(100),
-    hub_code            VARCHAR(10),
-    first_seen          TIMESTAMP DEFAULT NOW(),
-    last_seen           TIMESTAMP DEFAULT NOW()
-);
+-- ─────────────────────────────────────────────
+-- CORE TABLES
+-- ─────────────────────────────────────────────
 
 CREATE TABLE hubs (
     hub_code            VARCHAR(10) PRIMARY KEY,
@@ -723,6 +733,109 @@ CREATE TABLE hubs (
     active              BOOLEAN DEFAULT TRUE,
     created_at          TIMESTAMP DEFAULT NOW()
 );
+
+CREATE TABLE reporters (
+    phone_number        VARCHAR(20) PRIMARY KEY,
+    name                VARCHAR(100),
+    hub_code            VARCHAR(10) REFERENCES hubs(hub_code),
+    first_seen          TIMESTAMP DEFAULT NOW(),
+    last_seen           TIMESTAMP DEFAULT NOW()
+);
+
+-- ─────────────────────────────────────────────
+-- MAINTENANCE TICKETS
+-- Covers: Facility Maintenance, IT & Network,
+-- Housekeeping, Security & Access,
+-- Utilities & Infrastructure, Admin & Support,
+-- Billing & Commercial, Emergency
+-- ─────────────────────────────────────────────
+
+CREATE TABLE tickets (
+    id                      SERIAL PRIMARY KEY,
+    ticket_id               VARCHAR(20) UNIQUE NOT NULL,   -- e.g. KRM-042
+    hub_code                VARCHAR(10) REFERENCES hubs(hub_code),
+    hub_name                VARCHAR(100) NOT NULL,
+    main_category           VARCHAR(50) NOT NULL,          -- e.g. Facility Maintenance
+    subcategory_code        VARCHAR(10) NOT NULL,          -- e.g. FM-AC
+    subcategory_label       VARCHAR(100) NOT NULL,         -- e.g. AC
+    assigned_team           VARCHAR(100),                  -- e.g. HVAC Team
+    priority                VARCHAR(5) DEFAULT 'P2',       -- P1 / P2 / P3
+    status                  VARCHAR(20) DEFAULT 'Open',    -- Open / In Progress / Resolved
+    reporter_phone          VARCHAR(20) NOT NULL,
+    reporter_name           VARCHAR(100),
+    source_channel          VARCHAR(20) NOT NULL,          -- WhatsApp / Email / Phone / Walk-in
+    complaint_text          TEXT,
+    voice_transcription     TEXT,
+    photo_urls              TEXT[],
+    resolution_photo_url    VARCHAR(500),
+    assigned_by_manager     VARCHAR(100),
+    assigned_to_staff       VARCHAR(100),
+    reporter_count          INTEGER DEFAULT 1,
+    escalation_flag         BOOLEAN DEFAULT FALSE,
+    needs_review_flag       BOOLEAN DEFAULT FALSE,         -- set when classifier is not confident
+    is_billing              BOOLEAN DEFAULT FALSE,         -- true for Billing & Commercial tickets
+    is_emergency            BOOLEAN DEFAULT FALSE,         -- true for Emergency tickets (P1 auto-escalate)
+    created_at              TIMESTAMP DEFAULT NOW(),
+    assigned_at             TIMESTAMP,
+    resolved_at             TIMESTAMP,
+    resolution_time_minutes INTEGER,                       -- calculated on close
+    notes                   TEXT
+);
+
+-- ─────────────────────────────────────────────
+-- FIT-OUT & CUSTOMIZATION REQUESTS
+-- Separate table — separate workflow.
+-- These are project-type requests with vendor
+-- involvement, approvals, and longer lifecycles.
+-- Not part of the maintenance ticket pipeline.
+-- ─────────────────────────────────────────────
+
+CREATE TABLE fitout_requests (
+    id                      SERIAL PRIMARY KEY,
+    request_id              VARCHAR(20) UNIQUE NOT NULL,   -- e.g. FO-KRM-008
+    hub_code                VARCHAR(10) REFERENCES hubs(hub_code),
+    hub_name                VARCHAR(100) NOT NULL,
+    subcategory_code        VARCHAR(10) NOT NULL,          -- e.g. FO-WS
+    subcategory_label       VARCHAR(100) NOT NULL,         -- e.g. Workstation Setup
+    assigned_team           VARCHAR(100),                  -- e.g. Projects Team
+    priority                VARCHAR(5) DEFAULT 'P2',
+    status                  VARCHAR(30) DEFAULT 'Submitted', -- Submitted / Under Review / Approved / In Progress / Completed / Rejected
+    requester_phone         VARCHAR(20),
+    requester_name          VARCHAR(100),
+    source_channel          VARCHAR(20),
+    request_description     TEXT,
+    photo_urls              TEXT[],
+    vendor_name             VARCHAR(100),
+    estimated_cost          NUMERIC(10,2),
+    approved_by             VARCHAR(100),
+    approved_at             TIMESTAMP,
+    completion_photo_url    VARCHAR(500),
+    assigned_to             VARCHAR(100),
+    created_at              TIMESTAMP DEFAULT NOW(),
+    started_at              TIMESTAMP,
+    completed_at            TIMESTAMP,
+    notes                   TEXT
+);
+
+-- ─────────────────────────────────────────────
+-- PREVENTIVE MAINTENANCE SCHEDULE
+-- Phase 2 — schema captured for reference only.
+-- Not implemented in Phase 1.
+-- ─────────────────────────────────────────────
+
+-- CREATE TABLE preventive_maintenance_schedule (
+--     id                  SERIAL PRIMARY KEY,
+--     hub_code            VARCHAR(10) REFERENCES hubs(hub_code),
+--     subcategory_code    VARCHAR(10),
+--     subcategory_label   VARCHAR(100),
+--     assigned_team       VARCHAR(100),
+--     frequency           VARCHAR(20),   -- Monthly / Quarterly / Annual
+--     last_done_at        TIMESTAMP,
+--     next_due_at         TIMESTAMP,
+--     assigned_to         VARCHAR(100),
+--     status              VARCHAR(20) DEFAULT 'Pending',
+--     notes               TEXT
+-- );
 ```
 
 ### 11.8 Migration Path: PoC → Production
@@ -800,23 +913,166 @@ Every PoC component maps directly to a production equivalent with only a configu
 
 ## 13. Issue Category Taxonomy
 
-The following categories cover the known universe of complaints in a co-working hub. This list drives the keyword classifier and the AI classification fallback. Categories are designed to be mutually exclusive and collectively exhaustive.
+**Source:** Myofficespace Clockify Tags Master (authoritative operational taxonomy)  
+**Structure:** Two-level hierarchy — Main Category → Subcategory (Tag)  
+**Status:** OQ-02 resolved. Preventive Maintenance deferred to Phase 2. Fit-out & Customization handled via separate workflow and table (see DD-12 and Section 11.7).
 
-| Code | Category | Example Keywords (EN / HI / KN) |
-|---|---|---|
-| AC | Air Conditioning | AC, air condition, cooling, ठंडा नहीं, ಏಸಿ |
-| PLMB | Plumbing | leaking, pipe, water, drainage, टपक, ನೀರು |
-| ELEC | Electrical | power, electricity, socket, switch, बिजली, ವಿದ್ಯುತ್ |
-| FLOOD | Flooding / Water Logging | flood, waterlog, basement, बाढ़, ನೀರು ತುಂಬಿದೆ |
-| STP | Sewage / STP | STP, sewage, smell, odour, बदबू, ವಾಸನೆ |
-| CLNS | Cleanliness | clean, dirty, dust, washroom, साफ, ಸ್ವಚ್ಛ |
-| SECU | Security | security, access, lock, key, door, सुरक्षा, ಬಾಗಿಲು |
-| INTL | Internet / Network | wifi, internet, network, slow, वाई-फाई, ಇಂಟರ್ನೆಟ್ |
-| LIFT | Elevator / Lift | lift, elevator, stuck, लिफ्ट, ಲಿಫ್ಟ್ |
-| PEST | Pest Control | pest, cockroach, rat, insect, कीड़े, ಕ್ರಿಮಿ |
-| FURN | Furniture / Fixtures | chair, table, broken, desk, कुर्सी, ಕುರ್ಚಿ |
-| PARK | Parking | parking, vehicle, car, bike, पार्किंग, ಪಾರ್ಕಿಂಗ್ |
-| GNRL | General / Other | (fallback for anything unclassified) |
+This taxonomy drives three things in SPARTH:
+1. **Keyword classifier** in n8n — maps incoming complaint text to a subcategory
+2. **Team routing** — each subcategory maps to a responsible team for assignment notification
+3. **Auto-priority** — each subcategory has a pre-assigned priority level, removing the need for AI inference
+
+---
+
+### 13.1 Facility Maintenance
+
+Handled inside SPARTH as standard maintenance tickets.
+
+| Code | Subcategory | Assigned Team | Priority | Keywords (EN / HI / KN) |
+|---|---|---|---|---|
+| FM-AC | AC | HVAC Team | P1/P2 | AC, air condition, cooling, not cold, ठंडा नहीं, ಏಸಿ, ತಂಪಿಲ್ಲ |
+| FM-EL | Electrical | Electrical Team | P1/P2 | electrical, socket, switch, wire, power, बिजली, ವಿದ್ಯುತ್ |
+| FM-PL | Plumbing | Plumbing Team | P1/P2 | leak, pipe, water, tap, drain, टपक, ನೀರು ಸೋರುತ್ತಿದೆ |
+| FM-CP | Carpentry | Carpentry Team | P2/P3 | door, wood, carpenter, hinge, बढ़ई, ಮರದ ಕೆಲಸ |
+| FM-FN | Furniture | Maintenance Team | P2/P3 | chair, table, desk, broken, furniture, कुर्सी, ಕುರ್ಚಿ |
+| FM-PT | Painting | Vendor | P3 | paint, wall, colour, peeling, रंग, ಬಣ್ಣ |
+| FM-CV | Civil | Civil Vendor | P2/P3 | civil, crack, wall, ceiling, floor, दीवार, ಗೋಡೆ |
+| FM-GW | Glass Work | Vendor | P2/P3 | glass, window, mirror, broken glass, शीशा, ಗಾಜು |
+
+---
+
+### 13.2 IT & Network
+
+Handled inside SPARTH as standard tickets routed to the IT Team or Security Team.
+
+| Code | Subcategory | Assigned Team | Priority | Keywords (EN / HI / KN) |
+|---|---|---|---|---|
+| IT-IN | Internet | IT Team | P1 | internet, broadband, no internet, slow net, इंटरनेट, ಇಂಟರ್ನೆಟ್ |
+| IT-WF | WiFi | IT Team | P1 | wifi, wi-fi, wireless, no wifi, वाई-फाई, ವೈಫೈ |
+| IT-PR | Printer | IT Team | P2 | printer, print, printing, प्रिंटर, ಮುದ್ರಕ |
+| IT-LN | LAN | IT Team | P2 | LAN, cable, ethernet, network cable, लैन, ಲ್ಯಾನ್ |
+| IT-CC | CCTV | Security Team | P2 | CCTV, camera, surveillance, कैमरा, ಕ್ಯಾಮೆರಾ |
+| IT-AC | Access Control | IT Team | P2 | access, card reader, entry, swipe, एक्सेस, ಪ್ರವೇಶ |
+| IT-AV | AV Setup | IT Team | P2 | projector, screen, HDMI, speaker, display, प्रोजेक्टर, ಪ್ರೊಜೆಕ್ಟರ್ |
+| IT-BI | Biometric | IT Team | P2 | biometric, fingerprint, attendance, बायोमेट्रिक, ಬಯೋಮೆಟ್ರಿಕ್ |
+
+---
+
+### 13.3 Housekeeping
+
+Handled inside SPARTH as standard tickets routed to Housekeeping team or Vendor.
+
+| Code | Subcategory | Assigned Team | Priority | Keywords (EN / HI / KN) |
+|---|---|---|---|---|
+| HK-WC | Washroom Cleaning | Housekeeping | P2 | washroom, toilet, bathroom, dirty, smell, बाथरूम, ಶೌಚಾಲಯ |
+| HK-PC | Pantry Cleaning | Housekeeping | P2 | pantry, kitchen, dirty, clean, पेंट्री, ಪ್ಯಾಂಟ್ರಿ |
+| HK-GD | Garbage Disposal | Housekeeping | P2 | garbage, trash, waste, dustbin, कूड़ा, ತ್ಯಾಜ್ಯ |
+| HK-DC | Deep Cleaning | Housekeeping | P3 | deep clean, thorough, heavy cleaning, सफाई, ಆಳ ಶುಚಿಗೊಳಿಸುವಿಕೆ |
+| HK-PS | Pest Control | Vendor | P3 | pest, cockroach, rat, mosquito, insect, कीड़े, ಕ್ರಿಮಿ |
+
+---
+
+### 13.4 Security & Access
+
+Handled inside SPARTH. Security Incidents and Door Lock issues are P1 — the escalation alert fires immediately to founders.
+
+| Code | Subcategory | Assigned Team | Priority | Keywords (EN / HI / KN) |
+|---|---|---|---|---|
+| SA-VM | Visitor Management | Security Team | P2 | visitor, guest, entry, reception, आगंतुक, ಅತಿಥಿ |
+| SA-AC | Access Card | Security Team | P2 | access card, ID card, swipe card, एक्सेस कार्ड, ಪ್ರವೇಶ ಕಾರ್ಡ್ |
+| SA-DL | Door Lock | Security Team | P1/P2 | door, lock, stuck, open, closed, दरवाज़ा, ಬಾಗಿಲು |
+| SA-SI | Security Incident | Security Team | P1 | security, incident, theft, suspicious, सुरक्षा, ಭದ್ರತೆ |
+
+---
+
+### 13.5 Utilities & Infrastructure
+
+All subcategories are P1 — these are infrastructure issues that affect the entire hub. Immediate escalation to founders on creation.
+
+| Code | Subcategory | Assigned Team | Priority | Keywords (EN / HI / KN) |
+|---|---|---|---|---|
+| UI-DG | DG Backup | Maintenance Team | P1 | generator, DG, power backup, diesel, जनरेटर, ಜನರೇಟರ್ |
+| UI-WS | Water Supply | Maintenance Team | P1 | water, supply, no water, tank, पानी, ನೀರು |
+| UI-LF | Lift | Vendor | P1 | lift, elevator, stuck, not working, लिफ्ट, ಲಿಫ್ಟ್ |
+| UI-UP | UPS | IT Team | P1 | UPS, power backup, inverter, यूपीएस, ಯುಪಿಎಸ್ |
+| UI-EP | Electrical Panel | Electrical Team | P1 | panel, MCB, breaker, trip, electrical panel, पैनल, ಪ್ಯಾನಲ್ |
+
+---
+
+### 13.6 Admin & Support
+
+Handled inside SPARTH but routed to the Admin Team. These are service requests rather than complaints — lower urgency.
+
+| Code | Subcategory | Assigned Team | Priority | Keywords (EN / HI / KN) |
+|---|---|---|---|---|
+| AD-CR | Courier | Admin Team | P3 | courier, package, delivery, parcel, कूरियर, ಕೊರಿಯರ್ |
+| AD-RC | Reception | Admin Team | P3 | reception, front desk, receptionist, रिसेप्शन, ರಿಸೆಪ್ಶನ್ |
+| AD-PK | Parking | Admin Team | P3 | parking, vehicle, car, bike, पार्किंग, ಪಾರ್ಕಿಂಗ್ |
+| AD-ID | ID Card | Admin Team | P3 | ID card, identity, badge, आईडी कार्ड, ಐಡಿ ಕಾರ್ಡ್ |
+| AD-IN | Inventory | Admin Team | P2 | inventory, stock, supplies, stationery, इन्वेंटरी, ದಾಸ್ತಾನು |
+
+---
+
+### 13.7 Billing & Commercial
+
+**Decision:** Handled inside SPARTH and routed directly to the Accounts Team. Hub manager is not in the notification chain for billing issues — these go founder-visible and accounts-visible only.
+
+| Code | Subcategory | Assigned Team | Priority | Keywords (EN / HI / KN) |
+|---|---|---|---|---|
+| BC-IN | Invoice | Accounts Team | P2 | invoice, bill, receipt, बिल, ಇನ್ವಾಯ್ಸ್ |
+| BC-PF | Payment Follow-up | Accounts Team | P2 | payment, due, pending, follow up, भुगतान, ಪಾವತಿ |
+| BC-DR | Deposit Refund | Accounts Team | P2 | deposit, refund, security deposit, जमा, ಠೇವಣಿ |
+| BC-BC | Billing Clarification | Accounts Team | P2 | billing, clarification, query, charge, बिलिंग, ಬಿಲ್ಲಿಂಗ್ |
+
+---
+
+### 13.8 Emergency
+
+All Emergency subcategories are P1 and trigger an immediate escalation alert to founders bypassing the normal SLA window. The founders group receives an alert the moment the ticket is created, not after any SLA breach.
+
+| Code | Subcategory | Assigned Team | Priority | Keywords (EN / HI / KN) |
+|---|---|---|---|---|
+| EM-FA | Fire Alarm | Emergency Team | P1 | fire, alarm, smoke, emergency, आग, ಬೆಂಕಿ |
+| EM-PF | Major Power Failure | Electrical Team | P1 | power failure, blackout, no power, बिजली गई, ವಿದ್ಯುತ್ ಹೋಯಿತು |
+| EM-WL | Water Leakage | Maintenance Team | P1 | leakage, flooding, water everywhere, पानी, ನೀರು ತುಂಬಿದೆ |
+| EM-NO | Network Outage | IT Team | P1 | network down, outage, no internet, नेटवर्क, ನೆಟ್ವರ್ಕ್ ಇಲ್ಲ |
+
+---
+
+### 13.9 Fit-out & Customization
+
+**Decision:** Separate workflow and separate database table (`fitout_requests`). Not part of the maintenance ticket pipeline. These are project-type requests with longer lifecycles, vendor involvement, approvals, and timelines. See Section 11.7 for the `fitout_requests` table schema and DD-12 for the design rationale.
+
+| Code | Subcategory | Assigned Team | Priority |
+|---|---|---|---|
+| FO-WS | Workstation Setup | Projects Team | P2 |
+| FO-PW | Partition Work | Projects Team | P2 |
+| FO-BR | Branding | Marketing / Vendor | P3 |
+| FO-CM | Cabin Modification | Projects Team | P2 |
+| FO-SE | Seating Expansion | Projects Team | P2 |
+
+---
+
+### 13.10 Preventive Maintenance — Phase 2
+
+**Decision:** Deferred to Phase 2. These are scheduled, system-initiated tasks rather than reactive complaints. They require a different trigger mechanism (schedule-based, not complaint-based) and a different workflow. The subcategories and team assignments are captured here for Phase 2 reference.
+
+| Code | Subcategory | Assigned Team | Priority |
+|---|---|---|---|
+| PM-AS | AC Servicing | HVAC Team | P3 |
+| PM-EI | Electrical Inspection | Electrical Team | P3 |
+| PM-SA | Safety Audit | Safety Team | P3 |
+| PM-PC | Pest Control PM | Vendor | P3 |
+
+---
+
+### 13.11 Fallback Category
+
+| Code | Subcategory | Assigned Team | Priority |
+|---|---|---|---|
+| GN-OT | General / Other | Hub Manager | P2 |
+
+Used when the AI and keyword classifier cannot confidently assign a subcategory. The ticket is created with a "Needs Review" flag and the hub manager is prompted to reclassify it.
 
 ---
 
@@ -824,21 +1080,22 @@ The following categories cover the known universe of complaints in a co-working 
 
 The following items were identified during design but not yet resolved. They must be decided before or during Phase 1 build.
 
-| # | Question | Impact | Owner |
-|---|---|---|---|
-| OQ-01 | Which WhatsApp Business API provider — Interakt, Wati, AiSensy, or Meta direct? | High — drives all intake setup | Founders |
-| OQ-02 | Final list of issue categories — any categories missing from Section 13? | High — drives AI classification accuracy | Operations team |
-| OQ-03 | SLA thresholds — how many hours before a ticket triggers an escalation by category? | High — drives escalation logic in n8n | Founders |
-| OQ-04 | Hub naming and coding convention — e.g. KRM for Koramangala. Full list needed. | High — drives ticket ID format | Operations team |
-| OQ-05 | Who are all the maintenance staff by hub? Phone numbers and names needed to pre-register them. | High — drives assignment notification | Hub managers |
-| OQ-06 | What language should automated WhatsApp messages be sent in — English only, or bilingual? | Medium — affects reporter experience | Founders |
-| OQ-07 | Should voice notes from staff (DONE command) also be accepted, or text-only for commands? | Medium — affects resolution workflow design | Operations team |
-| OQ-08 | Is there a vendor / contractor layer? (External plumber, electrician hired per job) | Medium — may need a fourth actor type | Founders |
-| OQ-09 | Data retention policy — how long should resolved tickets be retained before archival? | Low — affects storage planning | Founders |
-| OQ-10 | VPS provider preference — Hetzner (European, cheapest), DigitalOcean, or AWS Lightsail? | Low — all work; pricing varies slightly | Tech team |
+| # | Question | Status | Decision / Notes | Owner |
+|---|---|---|---|---|
+| OQ-01 | Which WhatsApp Business API provider — Interakt, Wati, AiSensy, or Meta direct? | 🔴 Open | Twilio sandbox confirmed for PoC. Production provider TBD. | Founders |
+| OQ-02 | Final issue category list | ✅ Closed | Two-level taxonomy from Clockify Tags Master. 52 subcategories across 9 active categories. Billing inside SPARTH. Preventive Maintenance Phase 2. Fit-out separate workflow. | Founders |
+| OQ-03 | SLA thresholds per priority level | ✅ Closed | P1 = 2 hours, P2 = 8 hours, P3 = 48 hours. | Founders |
+| OQ-04 | Hub naming and coding convention | ✅ Closed | PoC uses single hub: **Alpha** (hub code: ALP). Ticket format: ALP-001. Full 20-hub list to be added before production go-live. | Founders |
+| OQ-05 | Full staff list by hub with phone numbers | ✅ Closed (PoC) | PoC uses 2–3 test phone numbers only. One as tenant/reporter, one as hub manager, one as maintenance staff. Production staff registry to be compiled before go-live. | Hub managers |
+| OQ-06 | Language for automated WhatsApp messages | 🔴 Open | English-only for PoC. Hindi bilingual recommended before go-live. | Founders |
+| OQ-07 | Voice note acceptance for DONE command | 🔴 Open | Currently text-only (DONE #ID). Voice DONE would require Whisper transcription + intent parsing on every staff reply. | Operations team |
+| OQ-08 | External vendor / contractor layer needed? | 🔴 Open | Some subcategories already route to "Vendor" — needs clarification on whether external vendors receive WhatsApp notifications and how they are registered. | Founders |
+| OQ-09 | Data retention policy | 🟢 Low priority | Suggested: Active tickets indefinite, resolved tickets archived after 12 months. | Founders |
+| OQ-10 | VPS provider preference | 🟢 Low priority | Hetzner recommended for lowest cost. DigitalOcean or AWS Lightsail also work. | Tech team |
 
 ---
 
-*SPARTH PRD v1.0 — Prepared May 2026*  
+*SPARTH PRD v1.2 — Updated May 2026*  
 *Built for myofficespace. Designed to scale.*  
-*Founders: Manjunath & Sharath*
+*Founders: Manjunath & Sharath*  
+*OQ-02, OQ-03, OQ-04, OQ-05 (PoC) closed. 6 open questions remaining (production scope).*
